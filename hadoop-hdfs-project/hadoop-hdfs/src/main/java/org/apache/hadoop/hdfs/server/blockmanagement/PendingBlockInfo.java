@@ -17,6 +17,9 @@ package org.apache.hadoop.hdfs.server.blockmanagement;
 
 import io.hops.metadata.common.FinderType;
 
+import java.util.List;
+import java.util.Set;
+
 /**
  * An object that contains information about a block that is being replicated.
  * It records the timestamp when the system started replicating the most recent
@@ -58,14 +61,15 @@ public class PendingBlockInfo {
   private long blockId;
   private int inodeId;
   private long timeStamp;
-  private int numReplicasInProgress;
+  private Set<Integer> storageIds;
 
+  
   public PendingBlockInfo(long blockId, int inodeId, long timestamp,
-      int numReplicas) {
+      Set<Integer> storageIds) {
     this.blockId = blockId;
     this.inodeId = inodeId;
     this.timeStamp = timestamp;
-    this.numReplicasInProgress = numReplicas;
+    this.storageIds = storageIds;
   }
 
   public long getTimeStamp() {
@@ -76,17 +80,20 @@ public class PendingBlockInfo {
     timeStamp = timestamp;
   }
 
-  void incrementReplicas(int increment) {
-    numReplicasInProgress += increment;
+  void incrementReplicas(Set<Integer> storageIds) {
+    storageIds.addAll(storageIds);
   }
 
-  void decrementReplicas() {
-    numReplicasInProgress--;
-    assert (numReplicasInProgress >= 0);
+  void decrementReplicas(int storageId) {
+    storageIds.remove(storageId);
+  }
+  
+  public Set<Integer> getStorageIds(){
+    return this.storageIds;
   }
 
   public int getNumReplicas() {
-    return numReplicasInProgress;
+    return storageIds.size();
   }
 
   /**

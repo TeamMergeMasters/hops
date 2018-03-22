@@ -32,7 +32,10 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.sql.Time;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 
 import static org.apache.hadoop.util.Time.now;
 
@@ -70,15 +73,19 @@ class PendingReplicationBlocks {
   /**
    * Add a block to the list of pending Replications
    */
-  void increment(BlockInfo block, int numReplicas)
+  void increment(BlockInfo block, DatanodeStorageInfo[] storages)
       throws StorageException, TransactionContextException {
+    Set<Integer> storageIds = new TreeSet<>();
+    for (DatanodeStorageInfo storage : storages) {
+      storageIds.add(storage.getSid());
+    }
+  
     PendingBlockInfo found = getPendingBlock(block);
     if (found == null) {
       addPendingBlockInfo(
-          new PendingBlockInfo(block.getBlockId(), block.getInodeId(), now(),
-              numReplicas));
+          new PendingBlockInfo(block.getBlockId(), block.getInodeId(), now(), storageIds));
     } else {
-      found.incrementReplicas(numReplicas);
+      found.incrementReplicas(storageIds);
       found.setTimeStamp(now());
       updatePendingBlockInfo(found);
     }
@@ -89,14 +96,14 @@ class PendingReplicationBlocks {
    * Decrement the number of pending replication requests
    * for this block.
    */
-  void decrement(BlockInfo block)
+  void decrement(BlockInfo block, DatanodeStorageInfo storageInfo)
       throws StorageException, TransactionContextException {
     PendingBlockInfo found = getPendingBlock(block);
     if (found != null && !isTimedout(found)) {
       if (LOG.isDebugEnabled()) {
         LOG.debug("Removing pending replication for " + block);
       }
-      found.decrementReplicas();
+      found.decrementReplicas(storageInfo.getSid());
       if (found.getNumReplicas() <= 0) {
         removePendingBlockInfo(found);
       } else {

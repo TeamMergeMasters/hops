@@ -107,7 +107,7 @@ public class PendingBlockContext
   @Override
   PendingBlockInfo cloneEntity(PendingBlockInfo pendingBlockInfo, int inodeId) {
     return new PendingBlockInfo(pendingBlockInfo.getBlockId(), inodeId,
-        pendingBlockInfo.getTimeStamp(), pendingBlockInfo.getNumReplicas());
+        pendingBlockInfo.getTimeStamp(), pendingBlockInfo.getStorageIds());
   }
 
   @Override

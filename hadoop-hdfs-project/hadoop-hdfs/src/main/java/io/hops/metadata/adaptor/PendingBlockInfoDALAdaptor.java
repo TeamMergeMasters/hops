@@ -82,7 +82,7 @@ public class PendingBlockInfoDALAdaptor extends
     if (hdfsClass != null) {
       return new PendingBlockInfo(hdfsClass.getBlockId(),
           hdfsClass.getInodeId(), hdfsClass.getTimeStamp(),
-          hdfsClass.getNumReplicas());
+          hdfsClass.getStorageIds());
     } else {
       return null;
     }
@@ -93,8 +93,7 @@ public class PendingBlockInfoDALAdaptor extends
       PendingBlockInfo dalClass) throws StorageException {
     if (dalClass != null) {
       return new org.apache.hadoop.hdfs.server.blockmanagement.PendingBlockInfo(
-          dalClass.getBlockId(), dalClass.getInodeId(), dalClass.getTimeStamp(),
-          dalClass.getNumReplicas());
+          dalClass.getBlockId(), dalClass.getInodeId(), dalClass.getTimeStamp(), null); //TODO
     } else {
       return null;
     }

@@ -17,8 +17,10 @@
  */
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
+import com.google.common.base.Preconditions;
 import io.hops.common.INodeUtil;
 import io.hops.exception.StorageException;
+import io.hops.exception.TransactionContextException;
 import io.hops.metadata.HdfsStorageFactory;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
 import io.hops.transaction.EntityManager;
@@ -35,15 +37,24 @@ import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.protocol.Block;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
+import org.apache.hadoop.hdfs.server.namenode.INode;
+import org.apache.hadoop.hdfs.server.namenode.INodeFile;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
+import org.apache.hadoop.hdfs.server.protocol.ReceivedDeletedBlockInfo;
+import org.apache.hadoop.hdfs.server.protocol.ReceivedDeletedBlockInfo.BlockStatus;
+import org.apache.hadoop.hdfs.server.protocol.StorageReceivedDeletedBlocks;
 import org.junit.Test;
 
 import java.io.IOException;
+import java.util.ArrayList;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -58,6 +69,21 @@ public class TestPendingReplication {
   // Number of datanodes in the cluster
   private static final int DATANODE_COUNT = 5;
 
+  private DatanodeStorageInfo genDatanodeStorageInfo(int sId){
+    DatanodeStorageInfo storage = new DatanodeStorageInfo(null, new DatanodeStorage("bull"));
+    storage.setSid(sId);
+    return storage;
+  }
+  
+  private DatanodeStorageInfo[] genDatanodeStorageInfos(int number) {
+    Preconditions.checkArgument(number >= 0);
+    DatanodeStorageInfo[] storages = new DatanodeStorageInfo[number];
+    for (int i = 0; i < number; i++) {
+      storages[i] = genDatanodeStorageInfo(i);
+    }
+    return storages;
+  }
+  
   @Test
   public void testPendingReplication() throws IOException, StorageException {
     HdfsStorageFactory.setConfiguration(new HdfsConfiguration());
@@ -72,7 +98,7 @@ public class TestPendingReplication {
     //
     for (int i = 0; i < 10; i++) {
       BlockInfo block = newBlockInfo(new Block(i, i, 0), i);
-      increment(pendingReplications, block, i);
+      increment(pendingReplications, block, genDatanodeStorageInfos(i));
     }
     
     assertEquals("Size of pendingReplications ", 10,
@@ -83,15 +109,15 @@ public class TestPendingReplication {
     // remove one item and reinsert it
     //
     BlockInfo blk = newBlockInfo(new Block(8, 8, 0), 8);
-    decrement(pendingReplications, blk);             // removes one replica
+    decrement(pendingReplications, blk, genDatanodeStorageInfo(7));             // removes one replica
     assertEquals("pendingReplications.getNumReplicas ", 7,
         getNumReplicas(pendingReplications, blk));
 
     for (int i = 0; i < 7; i++) {
-      decrement(pendingReplications, blk);           // removes all replicas
+      decrement(pendingReplications, blk, genDatanodeStorageInfo(i));           // removes all replicas
     }
     assertTrue(pendingReplications.size() == 9);
-    increment(pendingReplications, blk, 8);
+    increment(pendingReplications, blk, genDatanodeStorageInfos(8));
     assertTrue(pendingReplications.size() == 10);
 
     //
@@ -119,7 +145,7 @@ public class TestPendingReplication {
 
     for (int i = 10; i < 15; i++) {
       BlockInfo block = newBlockInfo(new Block(i, i, 0), i);
-      increment(pendingReplications, block, i);
+      increment(pendingReplications, block, genDatanodeStorageInfos(i);
     }
     assertTrue(pendingReplications.size() == 15);
 
@@ -229,81 +255,110 @@ public class TestPendingReplication {
     }
   }
   
+ 
   
-  private void increment(final PendingReplicationBlocks pendingReplications,
-      final Block block, final int numReplicas) throws IOException {
-    incrementOrDecrementPendingReplications(pendingReplications, block, true,
-        numReplicas);
-  }
-
-  private void decrement(final PendingReplicationBlocks pendingReplications,
-      final Block block) throws IOException {
-    incrementOrDecrementPendingReplications(pendingReplications, block, false,
-        -1);
-  }
-
-  private void incrementOrDecrementPendingReplications(
-      final PendingReplicationBlocks pendingReplications, final Block block,
-      final boolean inc, final int numReplicas) throws IOException {
-    new HopsTransactionalRequestHandler(
-        HDFSOperationType.TEST_PENDING_REPLICATION) {
-      INodeIdentifier inodeIdentifier;
-
-      @Override
-      public void setUp() throws StorageException, IOException {
-        inodeIdentifier = INodeUtil.resolveINodeFromBlock(block);
+  /**
+   * Test if DatanodeProtocol#blockReceivedAndDeleted can correctly update the
+   * pending replications. Also make sure the blockReceivedAndDeleted call is
+   * idempotent to the pending replications.
+   */
+  @Test
+  public void testBlockReceived() throws Exception {
+    final Configuration conf = new HdfsConfiguration();
+    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, 1024);
+    MiniDFSCluster cluster = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(
+          DATANODE_COUNT).build();
+      cluster.waitActive();
+      
+      DistributedFileSystem hdfs = cluster.getFileSystem();
+      FSNamesystem fsn = cluster.getNamesystem();
+      BlockManager blkManager = fsn.getBlockManager();
+      
+      final String file = "/tmp.txt";
+      final Path filePath = new Path(file);
+      short replFactor = 1;
+      DFSTestUtil.createFile(hdfs, filePath, 1024L, replFactor, 0);
+      
+      // temporarily stop the heartbeat
+      ArrayList<DataNode> datanodes = cluster.getDataNodes();
+      for (int i = 0; i < DATANODE_COUNT; i++) {
+        DataNodeTestUtils.setHeartbeatsDisabledForTests(datanodes.get(i), true);
       }
-
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = LockFactory.getInstance();
-        locks
-            .add(lf.getIndividualBlockLock(block.getBlockId(), inodeIdentifier))
-            .add(lf.getBlockRelated(LockFactory.BLK.PE));
-      }
-
-      @Override
-      public Object performTask() throws StorageException, IOException {
-        BlockInfo blockInfo = EntityManager
-            .find(BlockInfo.Finder.ByBlockIdAndINodeId, block.getBlockId());
-        if (inc) {
-          pendingReplications.increment(blockInfo, numReplicas);
-        } else {
-          pendingReplications.decrement(blockInfo);
+      
+      hdfs.setReplication(filePath, (short) DATANODE_COUNT);
+      BlockManagerTestUtil.computeAllPendingWork(blkManager);
+      
+      assertEquals(1, blkManager.pendingReplications.size());
+  
+      INode iNode = fsn.getFSDirectory().getINode(file);
+      INodeFile fileNode = fsn.getFSDirectory().getINode4Write(file).asFile();
+      BlockInfo[] blocks = fileNode.getBlocks();
+      
+      assertEquals(DATANODE_COUNT - 1,
+          blkManager.pendingReplications.getNumReplicas(blocks[0]));
+      
+      LocatedBlock locatedBlock = hdfs.getClient().getLocatedBlocks(file, 0)
+          .get(0);
+      DatanodeInfo existingDn = (locatedBlock.getLocations())[0];
+      int reportDnNum = 0;
+      String poolId = cluster.getNamesystem().getBlockPoolId();
+      // let two datanodes (other than the one that already has the data) to
+      // report to NN
+      for (int i = 0; i < DATANODE_COUNT && reportDnNum < 2; i++) {
+        if (!datanodes.get(i).getDatanodeId().equals(existingDn)) {
+          DatanodeRegistration dnR = datanodes.get(i).getDNRegistrationForBP(
+              poolId);
+          StorageReceivedDeletedBlocks[] report = {
+              new StorageReceivedDeletedBlocks(
+                  new DatanodeStorage("Fake-storage-ID-Ignored"),
+                  new ReceivedDeletedBlockInfo[] { new ReceivedDeletedBlockInfo(
+                      blocks[0], BlockStatus.RECEIVED_BLOCK, "") }) };
+          cluster.getNameNodeRpc().blockReceivedAndDeleted(dnR, poolId, report);
+          reportDnNum++;
         }
-        return null;
       }
-    }.handle();
+      // IBRs are async, make sure the NN processes all of them.
+      cluster.getNamesystem().getBlockManager().flushBlockOps();
+      assertEquals(DATANODE_COUNT - 3,
+          blkManager.pendingReplications.getNumReplicas(blocks[0]));
+      
+      // let the same datanodes report again
+      for (int i = 0; i < DATANODE_COUNT && reportDnNum < 2; i++) {
+        if (!datanodes.get(i).getDatanodeId().equals(existingDn)) {
+          DatanodeRegistration dnR = datanodes.get(i).getDNRegistrationForBP(
+              poolId);
+          StorageReceivedDeletedBlocks[] report =
+              { new StorageReceivedDeletedBlocks(
+                  new DatanodeStorage("Fake-storage-ID-Ignored"),
+                  new ReceivedDeletedBlockInfo[] {
+                      new ReceivedDeletedBlockInfo(
+                          blocks[0], BlockStatus.RECEIVED_BLOCK, "")}) };
+          cluster.getNameNodeRpc().blockReceivedAndDeleted(dnR, poolId, report);
+          reportDnNum++;
+        }
+      }
+      
+      cluster.getNamesystem().getBlockManager().flushBlockOps();
+      assertEquals(DATANODE_COUNT - 3,
+          blkManager.pendingReplications.getNumReplicas(blocks[0]));
+      
+      // re-enable heartbeat for the datanode that has data
+      for (int i = 0; i < DATANODE_COUNT; i++) {
+        DataNodeTestUtils
+            .setHeartbeatsDisabledForTests(datanodes.get(i), false);
+        DataNodeTestUtils.triggerHeartbeat(datanodes.get(i));
+      }
+      
+      Thread.sleep(5000);
+      assertEquals(0, blkManager.pendingReplications.size());
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
   }
-
-  private int getNumReplicas(final PendingReplicationBlocks pendingReplications,
-      final Block block) throws IOException {
-    return (Integer) new HopsTransactionalRequestHandler(
-        HDFSOperationType.TEST_PENDING_REPLICATION) {
-      INodeIdentifier inodeIdentifier;
-
-      @Override
-      public void setUp() throws StorageException, IOException {
-        inodeIdentifier = INodeUtil.resolveINodeFromBlock(block);
-      }
-
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = LockFactory.getInstance();
-        locks
-            .add(lf.getIndividualBlockLock(block.getBlockId(), inodeIdentifier))
-            .add(lf.getBlockRelated(LockFactory.BLK.PE));
-      }
-
-      @Override
-      public Object performTask() throws StorageException, IOException {
-        BlockInfo blockInfo = EntityManager
-            .find(BlockInfo.Finder.ByBlockIdAndINodeId, block.getBlockId());
-        return pendingReplications.getNumReplicas(blockInfo);
-      }
-    }.handle();
-  }
-  
   
   /**
    * Test processPendingReplications
@@ -409,5 +464,91 @@ public class TestPendingReplication {
       }
     }.handle();
     return blockInfo;
+  }
+  
+   private void increment(final PendingReplicationBlocks pendingReplicationBlocks, final Block block, final DatanodeStorageInfo[]
+      targets) throws IOException {
+    new HopsTransactionalRequestHandler(
+        HDFSOperationType.TEST_PENDING_REPLICATION) {
+      INodeIdentifier inodeIdentifier;
+  
+      @Override
+      public void setUp() throws StorageException, IOException {
+        inodeIdentifier = INodeUtil.resolveINodeFromBlock(block);
+      }
+  
+      @Override
+      public void acquireLock(TransactionLocks locks) throws IOException {
+        LockFactory lf = LockFactory.getInstance();
+        locks
+            .add(lf.getIndividualBlockLock(block.getBlockId(), inodeIdentifier))
+            .add(lf.getBlockRelated(LockFactory.BLK.PE));
+      }
+  
+      @Override
+      public Object performTask() throws TransactionContextException, StorageException {
+        BlockInfo blockInfo = EntityManager
+            .find(BlockInfo.Finder.ByBlockIdAndINodeId, block.getBlockId());
+        pendingReplicationBlocks.increment(blockInfo, targets);
+        return null;
+      }
+    }.handle();
+  }
+  
+  private void decrement(final PendingReplicationBlocks pendingReplicationBlocks, final Block block,
+      final DatanodeStorageInfo target) throws IOException {
+     new HopsTransactionalRequestHandler(
+        HDFSOperationType.TEST_PENDING_REPLICATION) {
+      INodeIdentifier inodeIdentifier;
+  
+      @Override
+      public void setUp() throws StorageException, IOException {
+        inodeIdentifier = INodeUtil.resolveINodeFromBlock(block);
+      }
+  
+      @Override
+      public void acquireLock(TransactionLocks locks) throws IOException {
+        LockFactory lf = LockFactory.getInstance();
+        locks
+            .add(lf.getIndividualBlockLock(block.getBlockId(), inodeIdentifier))
+            .add(lf.getBlockRelated(LockFactory.BLK.PE));
+      }
+  
+      @Override
+      public Object performTask() throws TransactionContextException, StorageException {
+        BlockInfo blockInfo = EntityManager
+            .find(BlockInfo.Finder.ByBlockIdAndINodeId, block.getBlockId());
+        pendingReplicationBlocks.decrement(blockInfo, target);
+        return null;
+      }
+    }.handle();
+  }
+
+  private int getNumReplicas(final PendingReplicationBlocks pendingReplications,
+      final Block block) throws IOException {
+    return (Integer) new HopsTransactionalRequestHandler(
+        HDFSOperationType.TEST_PENDING_REPLICATION) {
+      INodeIdentifier inodeIdentifier;
+
+      @Override
+      public void setUp() throws StorageException, IOException {
+        inodeIdentifier = INodeUtil.resolveINodeFromBlock(block);
+      }
+
+      @Override
+      public void acquireLock(TransactionLocks locks) throws IOException {
+        LockFactory lf = LockFactory.getInstance();
+        locks
+            .add(lf.getIndividualBlockLock(block.getBlockId(), inodeIdentifier))
+            .add(lf.getBlockRelated(LockFactory.BLK.PE));
+      }
+
+      @Override
+      public Object performTask() throws StorageException, IOException {
+        BlockInfo blockInfo = EntityManager
+            .find(BlockInfo.Finder.ByBlockIdAndINodeId, block.getBlockId());
+        return pendingReplications.getNumReplicas(blockInfo);
+      }
+    }.handle();
   }
 }

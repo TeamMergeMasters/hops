@@ -315,6 +315,18 @@ public class FSDirectory implements Closeable {
   }
   
   /**
+   * Persist the new block (the last block of the given file).
+   */
+  void persistNewBlock(String path, INodeFile file) throws IOException {
+    Preconditions.checkArgument(file.isUnderConstruction());
+    if (NameNode.stateChangeLog.isDebugEnabled()) {
+      NameNode.stateChangeLog.debug("DIR* FSDirectory.persistNewBlock: "
+          + path + " with new block " + file.getLastBlock().toString()
+          + ", current total block count is " + file.getBlocks().length);
+    }
+  }
+
+  /**
    * Close file.
    */
   void closeFile(String path, INodeFile file)

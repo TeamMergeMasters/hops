@@ -49,7 +49,6 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileSystem.Statistics;
 import org.apache.hadoop.fs.Options.Rename;
-import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
@@ -119,6 +118,10 @@ import java.util.concurrent.TimeoutException;
 import static org.apache.hadoop.fs.CreateFlag.CREATE;
 import static org.apache.hadoop.fs.CreateFlag.OVERWRITE;
 import org.apache.hadoop.fs.FileContext;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclEntryScope;
+import org.apache.hadoop.fs.permission.AclEntryType;
+import org.apache.hadoop.fs.permission.FsAction;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_PERMISSIONS_SUPERUSERGROUP_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_PERMISSIONS_SUPERUSERGROUP_KEY;
 import org.apache.hadoop.io.retry.DefaultFailoverProxyProvider;
@@ -1384,6 +1387,34 @@ public class DFSTestUtil {
       locatedBlocks = DFSClientAdapter.callGetBlockLocations(
           cluster.getNameNodeRpc(nnIndex), filePath, 0L, bytes.length);
     } while (locatedBlocks.isUnderConstruction());
+    // OP_SET_ACL
+    List<AclEntry> aclEntryList = Lists.newArrayList();
+    aclEntryList.add(
+        new AclEntry.Builder()
+            .setPermission(FsAction.READ_WRITE)
+            .setScope(AclEntryScope.ACCESS)
+            .setType(AclEntryType.USER)
+            .build());
+    aclEntryList.add(
+        new AclEntry.Builder()
+            .setName("user")
+            .setPermission(FsAction.READ_WRITE)
+            .setScope(AclEntryScope.ACCESS)
+            .setType(AclEntryType.USER)
+            .build());
+    aclEntryList.add(
+        new AclEntry.Builder()
+            .setPermission(FsAction.WRITE)
+            .setScope(AclEntryScope.ACCESS)
+            .setType(AclEntryType.GROUP)
+            .build());
+    aclEntryList.add(
+        new AclEntry.Builder()
+            .setPermission(FsAction.NONE)
+            .setScope(AclEntryScope.ACCESS)
+            .setType(AclEntryType.OTHER)
+            .build());
+    filesystem.setAcl(pathConcatTarget, aclEntryList);
   }
   
 

@@ -540,7 +540,7 @@ public class BlockManager {
     datanodeManager.activate(conf);
     this.replicationThread.start();
     if (isBlockTokenEnabled()) {
-      this.blockTokenSecretManager.generateKeysIfNeeded();
+      this.blockTokenSecretManager.generateKeysIfLeader();
     }
   }
 

@@ -54,13 +54,6 @@ public class NameNodeBlockTokenSecretManager extends BlockTokenSecretManager {
         encryptionAlgorithm);
     this.namesystem = namesystem;
     this.setSerialNo(new SecureRandom().nextInt());
-    if (isLeader()) {
-      // TODO[Hooman]: Since Master is keeping the serialNo locally, so whenever
-      // A namenode crashes it should remove all keys from the database.
-      this.generateKeys();
-    } else {
-      retrieveBlockKeys();
-    }
   }
 
   @Override
@@ -184,12 +177,11 @@ public class NameNodeBlockTokenSecretManager extends BlockTokenSecretManager {
     return createPassword(identifier.getBytes(), key.getKey());
   }
 
-  public void generateKeysIfNeeded() throws IOException {
+  public void generateKeysIfLeader() throws IOException {
+    //if leader when this is block it means that the NN became leader immediately after starting
+    //which means that all the NN in the cluster were restarted. When this happen we should rotate the keys.
     if (isLeader()) {
-      retrieveBlockKeys();
-      if (currentKey == null && nextKey == null) {
-        generateKeys();
-      }
+      generateKeys();
     }
   }
 
